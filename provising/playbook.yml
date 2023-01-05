@@ -1,0 +1,189 @@
+# https://www.digitalocean.com/community/tutorials/how-to-use-ansible-to-install-and-set-up-apache-on-ubuntu-18-04
+---
+- hosts: all
+  become: true
+  vars:
+    db_name: wordpress
+    db_user: wp
+    db_user_password: bananas
+    db_host: localhost
+    path_wordpress: /srv/www/wordpress
+    admin_user: luisgg
+    admin_mail: luisgg@gmail.unir
+    admin_pass: wordpress1234-
+
+  tasks:
+  # Install initial dependencies
+  - name: Install required tools packages
+    apt:
+      state: present
+      update_cache: yes
+      name:
+        - unzip
+  - name: Install Python packages
+    apt:
+      state: present
+      update_cache: yes
+      name:
+        - python3-pip
+        - libmysqlclient-dev
+        - python3-dev
+        - python3-mysqldb
+  # Install and configure PHP
+  - name: Install PHP packages
+    apt:
+      state: present
+      update_cache: yes
+      name:
+        - php
+        - php-fpm
+        - php-mysql
+        - php-xml
+        - php-bcmath
+        - php-curl
+        - php-imagick
+        - php-intl
+        - php-json 
+        - php-mbstring
+  # Install and configure MYSQL
+  - name: Install MySQL packages
+    apt:
+      state: present
+      update_cache: yes
+      name:
+        - mysql-server
+        - mysql-client
+  - name: Generate new root password
+    command: openssl rand -hex 7 creates=/root/.my.cnf
+    register: mysql_new_root_pass
+  - name: Remove anonymous users
+    mysql_user: name="" state=absent
+    when: mysql_new_root_pass.changed
+  - name: Remove test database
+    mysql_db: name=test state=absent
+    when: mysql_new_root_pass.changed
+  - name: Output new root password
+    debug: msg="New root password is {{mysql_new_root_pass.stdout}}"
+    when: mysql_new_root_pass.changed
+  - name: Update root password
+    mysql_user:
+      name: root
+      host: "{{item}}" 
+      password: "{{mysql_new_root_pass.stdout}}"
+    loop:
+    - "{{ansible_hostname}}"
+    - 127.0.0.1
+    - ::1
+    - localhost
+    when: mysql_new_root_pass.changed
+  - name: Create my.cnf
+    template:
+      src: templates/mysql/my.cnf
+      dest: /root/.my.cnf
+    when: mysql_new_root_pass.changed
+  # Install and configure Apache
+  - name: Install apache2
+    apt:
+      state: present
+      update_cache: yes 
+      name:
+        - apache2
+        - ghostscript
+        - libapache2-mod-php
+  - name: enabled mod_rewrite
+    apache2_module: name=rewrite state=present
+    notify:
+      - restart apache2
+  - name: Create Apache template wordpress.conf
+    template: 
+      src: templates/apache/wordpress.conf 
+      dest: /etc/apache2/sites-available/wordpress.conf
+    notify:
+      - restart apache2
+  - name: Disable default Apache site
+    shell: /usr/sbin/a2dissite 000-default.conf
+    notify: Reload Apache
+  - name: Enable new Apache site
+    shell: /usr/sbin/a2ensite wordpress
+    notify: Reload Apache
+  # Install and configure Wordpress 
+  - name: Get WordPress checksum
+    uri: 
+      url: https://wordpress.org/latest.zip.sha1
+      return_content: true
+    register: wp_checksum
+  - name: Download WordPress
+    get_url: 
+      url: https://wordpress.org/latest.zip
+      dest: /tmp/wordpress.zip
+      checksum: "sha1:{{wp_checksum.content}}"
+  - name: Unzip WordPress
+    unarchive:
+      src: /tmp/wordpress.zip
+      dest: /tmp
+      remote_src: true
+  - name: Create project folder
+    file:
+      dest: "{{path_wordpress}}"
+      state: directory
+  - name: Copy WordPress files
+    copy:
+      src: /tmp/wordpress/.
+      dest: "{{path_wordpress}}"
+      remote_src: true
+
+  - name: Set permissions for WordPress files
+    file:
+      path: "{{path_wordpress}}"
+      owner: www-data
+      group: www-data
+      mode: 0755
+      recurse: yes
+  - name: Create WordPress MySQL database
+    mysql_db:
+      name: "{{db_name}}"
+      state: present
+  - name: Create WordPress MySQL user
+    mysql_user:
+      name: "{{db_user}}"
+      host: "{{db_host}}"
+      password: "{{db_user_password}}"
+      priv: "{{db_name}}.*:ALL"
+  - name: Create wp-config
+    template:
+      src: templates/wordpress/wpconfig.php
+      dest: "{{path_wordpress}}/wp-config.php"
+
+  - name: Set permissions for WordPress file
+    file:
+      path: "{{path_wordpress}}/wp-config.php"
+      owner: www-data
+      group: www-data
+      mode: 0755
+    notify:
+      - restart apache2  
+# Install WP
+  - name: Install WP-CLI
+    get_url: 
+      url: https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+      dest: /tmp/wp-cli.phar
+    
+  - name: Unzip WP-CLI file
+    file:
+      path: /tmp/wp-cli.phar
+      mode: 0777
+  - name: Move WP-CLI file
+    command: mv /tmp/wp-cli.phar /usr/local/bin/wp
+
+  - name: Set WP-CLI configuration
+    command: "wp core install --url='http://127.0.0.1' --title='Herramientas de automatización de despliegues: Luis Garcia' --admin_user='{{admin_user}}' --admin_password='{{admin_pass}}' --admin_email='{{admin_mail}}' --allow-root --path='{{path_wordpress}}'"
+
+  handlers:
+  - name: restart apache2
+    service:
+      name: apache2
+      state: restarted
+  - name: Reload Apache
+    service:
+      name: apache2
+      state: reloaded
